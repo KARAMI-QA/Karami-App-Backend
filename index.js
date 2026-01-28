@@ -8,6 +8,8 @@ mysqlSync();
 appServer();
 
 
-console.log("karami server ready at " + new Date().toISOString());
+const nowUtc3 = new Date(Date.now() + 3 * 60 * 60 * 1000);
+console.log("karami server ready at " + nowUtc3.toISOString());
+
 
 

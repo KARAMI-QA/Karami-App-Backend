@@ -16,6 +16,7 @@ import { graphqlPubsub } from "../app-server/pubsub.js";
 import { validateUserToken } from "./users-gql.js";
 import { generateUploadURL, generateDownloadURL } from "../utils/gcs-helper.js";
 import crypto from "crypto";
+import sequelize from "../mysql/connection.js";
 
 const typeDef = gql`
   type ChatParticipant {
@@ -128,14 +129,12 @@ const typeDef = gql`
   }
 
   type Subscription {
-    messageReceived(userToken: String!): Message!
-    chatUpdated(userToken: String!): Chat!
+    messageReceived(userToken: String!): Message
   }
 `;
 
 // Subscription topics
 const MESSAGE_RECEIVED_TOPIC = 'message_received';
-const CHAT_UPDATED_TOPIC = 'chat_updated';
 
 // Helper function to get user ID from token
 const getUserIdFromToken = (userToken) => {
@@ -152,15 +151,12 @@ const parseParticipants = (participantsData) => {
     return [];
   }
   
-  // If it's already an array, return it
   if (Array.isArray(participantsData)) {
     return participantsData;
   }
   
-  // If it's a string, try to parse it as JSON
   if (typeof participantsData === 'string') {
     try {
-      // Check if it's a JSON string
       if (participantsData.trim().startsWith('[') || participantsData.trim().startsWith('{')) {
         const parsed = JSON.parse(participantsData);
         return Array.isArray(parsed) ? parsed : [parsed];
@@ -171,7 +167,6 @@ const parseParticipants = (participantsData) => {
     }
   }
   
-  // If it's an object but not an array
   if (typeof participantsData === 'object' && participantsData !== null) {
     return [participantsData];
   }
@@ -197,14 +192,13 @@ const parseLastMessage = (lastMessageData) => {
   return lastMessageData;
 };
 
-// Query Resolvers
+// Query Resolvers (keep all existing query resolvers unchanged)
 const chatGetOne = async (parent, args) => {
   const { userToken, chatId } = args;
   const userId = getUserIdFromToken(userToken);
   
-  const chat = await getChatById({ chatId });
+  const chat = await getChatById({ chatId, currentUserId: userId }); // Pass userId here
   
-  // Use helper functions to parse data
   const participants = parseParticipants(chat.participants);
   const isParticipant = participants.some(p => String(p.id) === String(userId));
   
@@ -212,7 +206,6 @@ const chatGetOne = async (parent, args) => {
     throw new Error("PermissionError: You are not a participant of this chat");
   }
   
-  // Parse last_message if it exists
   if (chat.last_message) {
     chat.last_message = parseLastMessage(chat.last_message);
   }
@@ -226,7 +219,6 @@ const chatGetUserChats = async (parent, args) => {
   
   const chats = await getUserChats({ userId });
   
-  // Parse participants and last_message for each chat
   return chats.map(chat => {
     if (chat.participants) {
       chat.participants = parseParticipants(chat.participants);
@@ -252,7 +244,6 @@ const chatGetMessages = async (parent, args) => {
   const { userToken, chatId, limit, offset } = args;
   const userId = getUserIdFromToken(userToken);
   
-  // Verify user is chat participant
   const chat = await getChatById({ chatId });
   const participants = parseParticipants(chat.participants);
   const isParticipant = participants.some(p => String(p.id) === String(userId));
@@ -263,11 +254,10 @@ const chatGetMessages = async (parent, args) => {
   
   const messages = await getChatMessages({ chatId, limit, offset });
   
-  // Get total count
   const totalResult = await sequelize.query(
     `SELECT COUNT(*) as total FROM messages WHERE chat_id = ?`,
     {
-      type: Sequelize.QueryTypes.SELECT,
+      type: sequelize.QueryTypes.SELECT,
       replacements: [chatId]
     }
   );
@@ -312,7 +302,6 @@ const chatGenerateUploadURL = async (parent, args) => {
   const { userToken, file_name, content_type } = args;
   const userId = getUserIdFromToken(userToken);
   
-  // Validate file type
   const allowedTypes = [
     'image/jpeg', 'image/png', 'image/gif', 'image/webp',
     'video/mp4', 'video/mpeg', 'video/quicktime',
@@ -325,17 +314,15 @@ const chatGenerateUploadURL = async (parent, args) => {
     throw new Error("Unsupported file type");
   }
   
-  // Generate unique file name
   const timestamp = Date.now();
   const randomString = crypto.randomBytes(8).toString('hex');
   const sanitizedFileName = file_name.replace(/[^a-zA-Z0-9.-]/g, '_');
   const finalFileName = `chat_media/${userId}/${timestamp}_${randomString}_${sanitizedFileName}`;
   
-  // Generate upload URL
   const uploadData = await generateUploadURL({
     fileName: finalFileName,
     contentType: content_type,
-    expiresIn: 15 * 60 // 15 minutes
+    expiresIn: 15 * 60
   });
   
   return {
@@ -353,10 +340,8 @@ const chatSendMessage = async (parent, args) => {
   
   let { chat_id, receiver_id, content, media_url, media_type } = input;
   
-  // Debug logging
-  console.log('chatSendMessage called:', { userId, chat_id, receiver_id });
+  // console.log('chatSendMessage called:', { userId, chat_id, receiver_id });
   
-  // If no chat_id provided, create/find direct chat
   if (!chat_id && receiver_id) {
     const chat = await findOrCreateDirectChat({ 
       userId1: userId, 
@@ -370,24 +355,14 @@ const chatSendMessage = async (parent, args) => {
     throw new Error("Either chat_id or receiver_id must be provided");
   }
   
-  // Verify user is chat participant
-  const chat = await getChatById({ chatId: chat_id });
-  console.log('Retrieved chat:', { 
-    chatId: chat.id, 
-    participantsType: typeof chat.participants,
-    participantsValue: chat.participants 
-  });
-  
+  const chat = await getChatById({ chatId: chat_id, currentUserId: userId });
   const participants = parseParticipants(chat.participants);
-  console.log('Parsed participants:', participants);
-  
   const isParticipant = participants.some(p => String(p.id) === String(userId));
   
   if (!isParticipant) {
     throw new Error("PermissionError: You are not a participant of this chat");
   }
   
-  // Create message
   const message = await createMessage({
     chatId: chat_id,
     senderId: userId,
@@ -396,23 +371,46 @@ const chatSendMessage = async (parent, args) => {
     mediaType: media_type
   });
   
-  console.log('Message created:', message.id);
-  
-  // Publish to all participants except sender
-  participants.forEach(participant => {
-    if (String(participant.id) !== String(userId)) {
-      console.log('Publishing to participant:', participant.id);
-      graphqlPubsub.publish(`${MESSAGE_RECEIVED_TOPIC}_${participant.id}`, {
-        messageReceived: message
-      });
-    }
+  // Get the chat again to ensure we have correct other_participant for the recipient
+  const recipientChat = await getChatById({ 
+    chatId: chat_id, 
+    currentUserId: receiver_id || participants.find(p => p.id !== userId)?.id 
   });
   
-  // Publish chat update to all participants
+  console.log('Message created with chat data:', {
+    messageId: message.id,
+    hasChat: !!message.chat,
+    hasOtherParticipant: !!recipientChat?.other_participant,
+    otherParticipantName: recipientChat?.other_participant?.name
+  });
+  
+  // Publish message to all participants EXCEPT the sender
+  // Each user gets their own subscription channel with their correct other_participant
   participants.forEach(participant => {
-    graphqlPubsub.publish(`${CHAT_UPDATED_TOPIC}_${participant.id}`, {
-      chatUpdated: chat
-    });
+    if (String(participant.id) !== String(userId)) {
+      console.log('Publishing message to participant:', participant.id);
+      
+      // Get chat with correct other_participant for this recipient
+      getChatById({ chatId: chat_id, currentUserId: participant.id })
+        .then(recipientChatData => {
+          // Clone message and update chat with correct other_participant
+          const messageForRecipient = { ...message };
+          if (recipientChatData) {
+            messageForRecipient.chat = recipientChatData;
+          }
+          
+          graphqlPubsub.publish(`${MESSAGE_RECEIVED_TOPIC}_${participant.id}`, {
+            messageReceived: messageForRecipient
+          });
+        })
+        .catch(err => {
+          console.error('Error getting chat for recipient:', err);
+          // Fallback to original message
+          graphqlPubsub.publish(`${MESSAGE_RECEIVED_TOPIC}_${participant.id}`, {
+            messageReceived: message
+          });
+        });
+    }
   });
   
   return message;
@@ -432,11 +430,16 @@ const chatMarkAsSeen = async (parent, args) => {
   
   await markMessageAsSeen({ messageId, userId });
   
-  // Get message and notify sender
+  // Get message and notify sender that their message was seen
   const message = await getMessageById({ messageId });
-  graphqlPubsub.publish(`${MESSAGE_RECEIVED_TOPIC}_${message.sender_id}`, {
-    messageReceived: message
-  });
+  
+  // Notify ONLY the sender that their message was seen
+  if (message && message.sender_id) {
+    console.log('Notifying sender that message was seen:', message.sender_id);
+    graphqlPubsub.publish(`${MESSAGE_RECEIVED_TOPIC}_${message.sender_id}`, {
+      messageReceived: message // This will contain updated read status
+    });
+  }
   
   return true;
 };
@@ -654,45 +657,48 @@ const chatDeleteChat = async (parent, args) => {
   return true;
 };
 
-// Subscription Resolvers
-// Subscription Resolvers
-// Update the subscription resolvers in chats-gql.js
-const messageReceived = {
-  subscribe: async (_, args, context) => {
-    const { userToken } = args;
-    console.log('Subscription: messageReceived requested with token:', userToken);
+// const messageReceived = {
+//   subscribe: async (_, args, context) => {
+//     const { userToken } = args;
+//     console.log('Subscription: messageReceived requested with token:', userToken);
     
-    // Validate token and get user ID
-    const userId = getUserIdFromToken(userToken);
-    console.log(`Subscription: User ${userId} subscribed to messageReceived`);
+//     // Validate token and get user ID
+//     const tokenData = validateUserToken(userToken);
+//     if (!tokenData) {
+//       throw new Error("AuthError: invalid user token");
+//     }
+//     const userId = tokenData.userId;
     
-    // Return async iterator for this user's channel
-    // Note: Use lowercase to match publish channel exactly
-    return graphqlPubsub.asyncIterableIterator(`message_received_${userId}`);
-  },
-  resolve: (payload) => {
-    console.log('Subscription: messageReceived payload received:', payload);
-    return payload.messageReceived;
-  }
-};
+//     console.log(`Subscription: User ${userId} subscribed to messageReceived`);
+    
+//     // Return async iterator for this user's channel
+//     // Make sure this matches exactly with the publish channel
+//     return graphqlPubsub.asyncIterableIterator(`message_received_${userId}`);
+//   },
+//   resolve: (payload) => {
+//     console.log('Subscription: messageReceived payload received:', payload);
+//     return payload.messageReceived;
+//   }
+// };
 
-const chatUpdated = {
-  subscribe: async (_, args, context) => {
-    const { userToken } = args;
-    console.log('Subscription: chatUpdated requested with token:', userToken);
+
+// const chatUpdated = {
+//   subscribe: async (_, args, context) => {
+//     const { userToken } = args;
+//     console.log('Subscription: chatUpdated requested with token:', userToken);
     
-    // Validate token and get user ID
-    const userId = getUserIdFromToken(userToken);
-    console.log(`Subscription: User ${userId} subscribed to chatUpdated`);
-    
-    // Return async iterator for this user's channel
-    return graphqlPubsub.asyncIterableIterator(`chat_updated_${userId}`);
-  },
-  resolve: (payload) => {
-    console.log('Subscription: chatUpdated payload received:', payload);
-    return payload.chatUpdated;
-  }
-};
+//       // Validate token and get user ID
+//       const userId = getUserIdFromToken(userToken);
+//     console.log(`Subscription: User ${userId} subscribed to chatUpdated`);
+      
+//     // Return async iterator for this user's channel
+//     return graphqlPubsub.asyncIterableIterator(`chat_updated_${userId}`);
+//   },
+//   resolve: (payload) => {
+//     console.log('Subscription: chatUpdated payload received:', payload);
+//       return payload.chatUpdated;
+//   }
+// };
 
 const resolvers = {
   Query: {
@@ -715,8 +721,28 @@ const resolvers = {
     chatDeleteChat,
   },
   Subscription: {
-    messageReceived,
-    chatUpdated,
+    messageReceived: {
+      subscribe: async (_, args) => {
+        const { userToken } = args;
+        
+        try {
+          // Validate the token and get user ID
+          const userId = getUserIdFromToken(userToken);
+          
+          // console.log(`✅ Subscription: User ${userId} subscribed to messageReceived`);
+          
+          // Return async iterator for this user's specific channel
+          return graphqlPubsub.asyncIterableIterator(`${MESSAGE_RECEIVED_TOPIC}_${userId}`);
+        } catch (error) {
+          console.error('❌ Subscription authentication error:', error.message);
+          throw new Error("AuthError: invalid user token for subscription");
+        }
+      },
+      resolve: (payload) => {
+        // console.log('📦 Subscription: Resolving messageReceived payload');
+        return payload.messageReceived;
+      }
+    }
   },
 };
 

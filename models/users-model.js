@@ -69,6 +69,57 @@ export const getEmail = async ({ email }) => {
       throw error;
     }
   };
+
+  export const getSearch = async ({ searchTerm }) => {
+    try {
+      // Search by email, phone, or name with multiple results
+      const users = await sequelize.query(
+        `
+        SELECT *,
+          DATE_FORMAT(created_at, '%Y-%m-%dT%H:%i:00.000Z') AS created_at, 
+          DATE_FORMAT(updated_at, '%Y-%m-%dT%H:%i:00.000Z') AS updated_at,
+          DATE_FORMAT(email_verified_at, '%Y-%m-%dT%H:%i:00.000Z') AS email_verified_at,
+          DATE_FORMAT(phone_verified_at, '%Y-%m-%dT%H:%i:00.000Z') AS phone_verified_at
+        FROM users
+        WHERE (email LIKE :emailSearch 
+               OR phone LIKE :phoneSearch 
+               OR name LIKE :nameSearch
+               OR CONCAT(first_name, ' ', last_name) LIKE :fullNameSearch
+               OR CONCAT(first_name, ' ', middle_name, ' ', last_name) LIKE :fullNameSearch2)
+          AND deleted_at IS NULL
+        ORDER BY 
+          CASE 
+            WHEN name = :exactSearch THEN 1
+            WHEN name LIKE :startsWithSearch THEN 2
+            ELSE 3
+          END,
+          name ASC
+        LIMIT 20; -- Limit results for performance
+        `,
+        {
+          type: QueryTypes.SELECT,
+          replacements: { 
+            emailSearch: `%${searchTerm}%`,
+            phoneSearch: `%${searchTerm}%`,
+            nameSearch: `%${searchTerm}%`,
+            fullNameSearch: `%${searchTerm}%`,
+            fullNameSearch2: `%${searchTerm}%`,
+            exactSearch: searchTerm,
+            startsWithSearch: `${searchTerm}%`
+          }
+        }
+      );
+  
+      if (users.length === 0) {
+        return []; // Return empty array instead of throwing error
+      }
+  
+      return users;
+    } catch (error) {
+      console.error('Search user error:', error);
+      return []; // Return empty array on error
+    }
+  };
   
   export const getOne = async ({ userId }) => {
     try {

@@ -26,9 +26,7 @@ const typeDefs = `
     type Subscription {
         operationFinished: Operation!
         somethingChanged: Result
-        # Add your chat subscriptions here
-        chatUpdated(userToken: String!): Chat!
-        messageReceived(userToken: String!): Message!
+    
     }
     type Operation {
         name: String!
@@ -38,68 +36,7 @@ const typeDefs = `
         id: String
     }
     
-    # Import chat types
-    type ChatParticipant {
-        id: ID!
-        name: String
-        email: String
-        image: String
-        is_online: Boolean
-    }
-
-    type ChatLastMessage {
-        id: ID!
-        content: String
-        media_url: String
-        media_type: String
-        sender_id: ID!
-        sender_name: String
-        created_at: String!
-    }
-
-    type Chat {
-        id: ID!
-        name: String
-        type: String!
-        is_active: Boolean!
-        last_message_id: ID
-        last_message_at: String
-        created_by: ID
-        deleted_at: String
-        created_at: String!
-        updated_at: String!
-        participants: [ChatParticipant]
-        last_message: ChatLastMessage
-        unread_count: Int
-        other_participant: ChatParticipant
-    }
-
-    type MessageSender {
-        id: ID!
-        name: String
-        email: String
-        image: String
-    }
-
-    type MessageRead {
-        user_id: ID!
-        read_at: String!
-    }
-
-    type Message {
-        id: ID!
-        chat_id: ID!
-        sender_id: ID!
-        content: String
-        media_url: String
-        media_type: String!
-        status: String!
-        created_at: String!
-        updated_at: String!
-        sender: MessageSender
-        chat: Chat
-        read_by: [MessageRead]
-    }
+    # REMOVED: Import chat types here - they're already defined in chatsGql
 `;
 
 const SOMETHING_CHANGED_TOPIC = 'something_changed';
@@ -221,47 +158,9 @@ const resolvers = {
     somethingChanged: {
       subscribe: () => graphqlPubsub.asyncIterableIterator(SOMETHING_CHANGED_TOPIC),
     },
-    // Add chat subscriptions here
-    chatUpdated: {
-      subscribe: async (_, args, context) => {
-        const { userToken } = args;
-        console.log('chatUpdated subscription requested with token:', userToken);
-        
-        // You need to validate the token and get user ID here
-        // For now, we'll use a simple approach
-        const userId = extractUserIdFromToken(userToken); // Implement this
-        
-        return graphqlPubsub.asyncIterableIterator(`chat_updated_${userId}`);
-      },
-      resolve: (payload) => {
-        console.log('chatUpdated subscription payload:', payload);
-        return payload.chatUpdated;
-      }
-    },
-    messageReceived: {
-      subscribe: async (_, args, context) => {
-        const { userToken } = args;
-        console.log('messageReceived subscription requested with token:', userToken);
-        
-        // You need to validate the token and get user ID here
-        const userId = extractUserIdFromToken(userToken); // Implement this
-        
-        return graphqlPubsub.asyncIterableIterator(`message_received_${userId}`);
-      },
-      resolve: (payload) => {
-        console.log('messageReceived subscription payload:', payload);
-        return payload.messageReceived;
-      }
-    },
+    // REMOVED: Duplicate chat subscription resolvers
   },
 };
-
-// Helper function to extract user ID from token (implement properly)
-function extractUserIdFromToken(token) {
-  // Implement your token validation and extraction logic here
-  // This is just a placeholder
-  return token || 'default_user';
-}
 
 // Mock function
 function mockLongLastingOperation(name) {

@@ -153,44 +153,54 @@ export const markMessagesAsDelivered = async ({ chatId, userId }) => {
 };
 
 export const markMessageAsSeen = async ({ messageId, userId }) => {
-  try {
-    // Check if already read
-    const existingReads = await sequelize.query(
-      `
-      SELECT 1 FROM message_reads 
-      WHERE message_id = :messageId AND user_id = :userId
-      `,
-      {
-        type: QueryTypes.SELECT,
-        replacements: { messageId, userId }
-      }
-    );
-
-    if (existingReads.length === 0) {
-      await sequelize.query(
+    try {
+      // Check if already read
+      const existingReads = await sequelize.query(
         `
-        INSERT INTO message_reads (message_id, user_id, read_at)
-        VALUES (:messageId, :userId, NOW());
-        
-        UPDATE messages 
-        SET status = 'SEEN', updated_at = NOW()
-        WHERE id = :messageId;
+        SELECT 1 FROM message_reads 
+        WHERE message_id = :messageId AND user_id = :userId
         `,
         {
-          type: QueryTypes.INSERT,
+          type: QueryTypes.SELECT,
           replacements: { messageId, userId }
         }
       );
+  
+      if (existingReads.length === 0) {
+        // First, insert into message_reads
+        await sequelize.query(
+          `
+          INSERT INTO message_reads (message_id, user_id, read_at)
+          VALUES (:messageId, :userId, NOW());
+          `,
+          {
+            type: QueryTypes.INSERT,
+            replacements: { messageId, userId }
+          }
+        );
+        
+        // Then, update the message status
+        await sequelize.query(
+          `
+          UPDATE messages 
+          SET status = 'SEEN', updated_at = NOW()
+          WHERE id = :messageId;
+          `,
+          {
+            type: QueryTypes.UPDATE,
+            replacements: { messageId }
+          }
+        );
+      }
+  
+      return true;
+    } catch (error) {
+      console.error('Error marking message as seen:', error);
+      throw error;
     }
+  };
 
-    return true;
-  } catch (error) {
-    console.error('Error marking message as seen:', error);
-    throw error;
-  }
-};
-
-export const createMessage = async ({ chatId, senderId, content, mediaUrl, mediaType = 'NONE' }) => {
+  export const createMessage = async ({ chatId, senderId, content, mediaUrl, mediaType = 'NONE' }) => {
     try {
       // Start a transaction
       const transaction = await sequelize.transaction();
@@ -228,18 +238,22 @@ export const createMessage = async ({ chatId, senderId, content, mediaUrl, media
         // Commit the transaction
         await transaction.commit();
         
-        // Get the full message with sender info
+        // Get the full message with sender info only
         const messages = await sequelize.query(
           `
-          SELECT m.*,
+          SELECT 
+            m.*,
             DATE_FORMAT(m.created_at, '%Y-%m-%dT%H:%i:00.000Z') AS created_at,
             DATE_FORMAT(m.updated_at, '%Y-%m-%dT%H:%i:00.000Z') AS updated_at,
+            
+            -- Sender info
             JSON_OBJECT(
               'id', u.id,
               'name', COALESCE(u.name, CONCAT(u.first_name, ' ', u.last_name)),
               'email', u.email,
               'image', u.image
             ) as sender
+            
           FROM messages m
           LEFT JOIN users u ON m.sender_id = u.id
           WHERE m.id = :messageId
@@ -252,12 +266,15 @@ export const createMessage = async ({ chatId, senderId, content, mediaUrl, media
           }
         );
         
-        // Parse sender if it's a JSON string
-        if (messages && messages.sender && typeof messages.sender === 'string') {
-          try {
-            messages.sender = JSON.parse(messages.sender);
-          } catch (e) {
-            console.error('Error parsing sender JSON:', e);
+        // Parse JSON strings
+        if (messages) {
+          // Parse sender if it's a JSON string
+          if (messages.sender && typeof messages.sender === 'string') {
+            try {
+              messages.sender = JSON.parse(messages.sender);
+            } catch (e) {
+              console.error('Error parsing sender JSON:', e);
+            }
           }
         }
         

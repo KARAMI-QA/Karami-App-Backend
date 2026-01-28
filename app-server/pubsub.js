@@ -8,8 +8,7 @@ const originalPublish = graphqlPubsub.publish.bind(graphqlPubsub);
 graphqlPubsub.publish = async (triggerName, payload) => {
   console.log('📢 PubSub Publish:', {
     triggerName,
-    payloadType: typeof payload.messageReceived !== 'undefined' ? 'message' : 
-                 typeof payload.chatUpdated !== 'undefined' ? 'chat' : 'other',
+    payloadType: typeof payload.messageReceived !== 'undefined' ? 'message' : 'other',
     timestamp: new Date().toISOString()
   });
   
@@ -23,13 +22,11 @@ graphqlPubsub.publish = async (triggerName, payload) => {
   }
 };
 
-// Helper to ensure consistent channel names
+// Helper to ensure consistent channel names for message received
 graphqlPubsub.publishMessageReceived = async (userId, message) => {
   return graphqlPubsub.publish(`message_received_${userId}`, { messageReceived: message });
 };
 
-graphqlPubsub.publishChatUpdated = async (userId, chat) => {
-  return graphqlPubsub.publish(`chat_updated_${userId}`, { chatUpdated: chat });
-};
+// Remove chatUpdated helper since we removed that subscription
 
 export { graphqlPubsub };

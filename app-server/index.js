@@ -31,21 +31,30 @@ export async function start() {
   });
 
   // GraphQL WebSocket Server
+
   const wsServerCleanup = useServer(
     {
       schema,
       context: async (ctx) => {
-        console.log('WebSocket Context created:', {
-          connectionParams: ctx.connectionParams,
-        });
+        // console.log('🔵 WebSocket Context - Full connectionParams:', JSON.stringify(ctx.connectionParams, null, 2));
         
-        // Extract user token from connection params
-        const token = ctx.connectionParams?.Authorization || 
-                     ctx.connectionParams?.authorization ||
-                     ctx.connectionParams?.userToken ||
-                     ctx.connectionParams?.UserToken;
+        let token = null;
+        const authHeader = ctx.connectionParams?.Authorization || 
+                          ctx.connectionParams?.authorization ||
+                          ctx.connectionParams?.token;
         
-        console.log('Extracted token:', token ? 'Present' : 'Missing');
+        // console.log('🔵 Raw auth header:', authHeader);
+        
+        if (authHeader) {
+          // Check if it's Bearer token or just token
+          if (typeof authHeader === 'string' && authHeader.startsWith("Bearer ")) {
+            token = authHeader.replace("Bearer ", "");
+          } else {
+            token = authHeader;
+          }
+        }
+        
+        // console.log('🔵 Extracted token:', token ? token.substring(0, 10) + '...' : 'Missing');
         
         return {
           token,
@@ -53,41 +62,33 @@ export async function start() {
         };
       },
       
-      // Handle connection
       onConnect: async (ctx) => {
-        console.log('Client connected via WebSocket');
-        const token = ctx.connectionParams?.Authorization || 
-                     ctx.connectionParams?.authorization ||
-                     ctx.connectionParams?.userToken ||
-                     ctx.connectionParams?.UserToken;
-        
-        if (!token) {
-          console.log('No token provided, allowing connection for subscription auth');
-          // Allow connection, but token will be validated in subscription resolvers
-          return true;
-        }
-        
-        console.log('Connection authenticated with token');
+        // console.log('🟢 CLIENT CONNECTED via WebSocket');
+        // console.log('🟢 Connection URL:', ctx.extra.request.url);
+        // console.log('🟢 Headers:', ctx.extra.request.headers);
+        // console.log('🟢 Connection params:', ctx.connectionParams);
         return true;
       },
       
-      // Handle disconnection
       onDisconnect: (ctx, code, reason) => {
-        console.log('Client disconnected:', { code, reason });
+        // console.log('🔴 CLIENT DISCONNECTED');
+        // console.log('🔴 Code:', code);
+        // console.log('🔴 Reason:', reason);
       },
       
-      // Handle subscription
       onSubscribe: (ctx, msg) => {
-        console.log('Subscription started:', {
-          query: msg.payload.query,
-          variables: msg.payload.variables,
-          operationName: msg.payload.operationName
-        });
+        // console.log('📡 SUBSCRIPTION STARTED');
+        // console.log('📡 Query:', msg.payload.query);
+        // console.log('📡 Variables:', msg.payload.variables);
+        // console.log('📡 Operation Name:', msg.payload.operationName);
       },
       
-      // Handle errors
       onError: (ctx, msg, errors) => {
-        console.error('Subscription error:', errors);
+        // console.error('❌ SUBSCRIPTION ERROR:', errors);
+      },
+      
+      onComplete: (ctx, msg) => {
+        // console.log('✅ SUBSCRIPTION COMPLETED');
       },
     },
     wsServer

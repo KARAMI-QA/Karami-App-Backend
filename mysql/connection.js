@@ -26,7 +26,7 @@ const sequelize = new Sequelize(
       max: 3,
       timeout: 30000
     },
-    timezone: '+00:00'
+      timezone: '+03:00'
   }
 );
 

@@ -1,6 +1,6 @@
 import gql from "graphql-tag";
 import { Sequelize } from "sequelize";
-import UsersModel, { getEmail, getOne } from "../models/users-model.js";
+import UsersModel, { getEmail, getOne, getSearch } from "../models/users-model.js";
 import cryptoHelper from "../utils/crypto-helper.js";
 
 const typeDef = gql`
@@ -33,11 +33,30 @@ const typeDef = gql`
     updated_at: String!
   }
 
+  type PaginationInfo {
+    currentPage: Int!
+    perPage: Int!
+    totalItems: Int!
+    totalPages: Int!
+    hasNextPage: Boolean!
+    hasPreviousPage: Boolean!
+  }
+
+  type PaginatedUsers {
+    users: [User]!
+    pagination: PaginationInfo!
+  }
+
   type LoginResponse {
     success: Boolean!
     message: String
     userToken: String
     user: User
+  }
+
+  input PaginationInput {
+    page: Int = 1
+    perPage: Int = 10
   }
 
   input LoginInput {
@@ -58,10 +77,16 @@ const typeDef = gql`
 
   type Query {
     userGetOne(userToken: String!): User
+    userSearch(userToken: String!, searchTerm: String!): [User]
     userGetByEmail(userToken: String!, email: String!): User
-    userGet100(userToken: String!): [User]
-    userGetActiveEmployees(userToken: String!): [User]
-    userGetAdmins(userToken: String!): [User]
+    
+    # Updated queries with pagination
+    userGetAll(userToken: String!, pagination: PaginationInput): PaginatedUsers!
+    userGetActiveEmployees(userToken: String!, pagination: PaginationInput): PaginatedUsers!
+    userGetAdmins(userToken: String!, pagination: PaginationInput): PaginatedUsers!
+    
+    # Keep backward compatible queries (deprecated)
+    userGet100(userToken: String!): [User] @deprecated(reason: "Use userGetAll with pagination instead")
     
     userValidateToken(userToken: String!): Boolean
   }
@@ -72,8 +97,6 @@ const typeDef = gql`
     userResetPassword(resetInput: ResetPasswordInput!): Boolean!
   }
 `;
-
-// Helper function to generate user token
 const generateUserToken = (user) => {
   const timestamp = Date.now();
   const random = Math.random().toString(36).substring(2, 15);
@@ -95,6 +118,62 @@ export const validateUserToken = (userToken) => {
   } catch (error) {
     return null;
   }
+};
+
+// Common pagination helper function
+const paginateUsers = async (findOptions, page = 1, perPage = 10) => {
+  // Calculate offset
+  const offset = (page - 1) * perPage;
+  
+  // Get total count
+  const countOptions = { ...findOptions };
+  delete countOptions.limit;
+  delete countOptions.offset;
+  delete countOptions.order;
+  delete countOptions.attributes;
+  
+  const totalItems = await UsersModel.count(countOptions);
+  
+  // Calculate total pages
+  const totalPages = Math.ceil(totalItems / perPage);
+  
+  // Get paginated data
+  const users = await UsersModel.findAll({
+    ...findOptions,
+    limit: perPage,
+    offset: offset,
+    order: findOptions.order || [['created_at', 'DESC']],
+    raw: true,
+  });
+  
+  // Format dates for each user
+  const formattedUsers = users.map(user => ({
+    ...user,
+    created_at: user.created_at ? 
+      new Date(user.created_at).toISOString().replace('T', ' ').substring(0, 19) : 
+      null,
+    updated_at: user.updated_at ? 
+      new Date(user.updated_at).toISOString().replace('T', ' ').substring(0, 19) : 
+      null,
+    email_verified_at: user.email_verified_at ? 
+      new Date(user.email_verified_at).toISOString().replace('T', ' ').substring(0, 19) : 
+      null,
+    phone_verified_at: user.phone_verified_at ? 
+      new Date(user.phone_verified_at).toISOString().replace('T', ' ').substring(0, 19) : 
+      null,
+  }));
+  
+  return {
+    users: formattedUsers,
+    pagination: {
+      currentPage: page,
+      perPage: perPage,
+      totalItems: totalItems,
+      totalPages: totalPages,
+      hasNextPage: page < totalPages,
+      hasPreviousPage: page > 1,
+    }
+  };
 };
 
 // Query Resolvers
@@ -136,7 +215,6 @@ const userGetOne = async (parent, args) => {
   }
 };
 
-
 const userGetByEmail = async (parent, args) => {
   const { userToken, email } = args;
   
@@ -162,6 +240,165 @@ const userGetByEmail = async (parent, args) => {
   }
 };
 
+const userSearch = async (parent, args) => {
+  const { userToken, searchTerm } = args;
+  
+  const tokenData = validateUserToken(userToken);
+  if (!tokenData) {
+    throw new Error("AuthError: invalid user token");
+  }
+
+  const authUser = await UsersModel.findByPk(tokenData.userId);
+  if (!authUser) {
+    throw new Error("AuthError: user not found");
+  }
+
+  try {
+    const users = await getSearch({ searchTerm });
+    return users; // Now returns array of users
+  } catch (error) {
+    console.error('Search user error:', error);
+    return []; // Return empty array instead of throwing error
+  }
+};
+
+// New paginated query for all users
+const userGetAll = async (parent, args) => {
+  const { userToken, pagination = {} } = args;
+  const { page = 1, perPage = 10 } = pagination;
+  
+  // Validate pagination parameters
+  if (page < 1) {
+    throw new Error("Page must be greater than 0");
+  }
+  
+  if (perPage < 1 || perPage > 100) {
+    throw new Error("PerPage must be between 1 and 100");
+  }
+  
+  const tokenData = validateUserToken(userToken);
+  if (!tokenData) {
+    throw new Error("AuthError: invalid user token");
+  }
+
+  const authUser = await UsersModel.findByPk(tokenData.userId);
+  if (!authUser || authUser.is_super !== 1) {
+    throw new Error("PermissionError: Admin access required");
+  }
+
+  try {
+    const findOptions = {
+      where: {
+        deleted_at: null,
+      },
+      attributes: {
+        include: [
+          [Sequelize.literal(`DATE_FORMAT(created_at, '%Y-%m-%dT%H:%i:00.000Z')`), 'created_at'],
+          [Sequelize.literal(`DATE_FORMAT(updated_at, '%Y-%m-%dT%H:%i:00.000Z')`), 'updated_at'],
+          [Sequelize.literal(`DATE_FORMAT(email_verified_at, '%Y-%m-%dT%H:%i:00.000Z')`), 'email_verified_at'],
+          [Sequelize.literal(`DATE_FORMAT(phone_verified_at, '%Y-%m-%dT%H:%i:00.000Z')`), 'phone_verified_at'],
+        ],
+      },
+    };
+
+    return await paginateUsers(findOptions, page, perPage);
+  } catch (error) {
+    console.error('Error fetching users:', error);
+    throw new Error("Error fetching users");
+  }
+};
+
+// Updated paginated query for active employees
+const userGetActiveEmployees = async (parent, args) => {
+  const { userToken, pagination = {} } = args;
+  const { page = 1, perPage = 10 } = pagination;
+  
+  // Validate pagination parameters
+  if (page < 1) {
+    throw new Error("Page must be greater than 0");
+  }
+  
+  if (perPage < 1 || perPage > 1000) {
+    throw new Error("PerPage must be between 1 and 1000");
+  }
+  
+  const tokenData = validateUserToken(userToken);
+  if (!tokenData) {
+    throw new Error("AuthError: invalid user token");
+  }
+
+  try {
+    const findOptions = {
+      where: {
+        is_employee: 1,
+        status: 'Active',
+        deleted_at: null,
+      },
+      attributes: {
+        include: [
+          [Sequelize.literal(`DATE_FORMAT(created_at, '%Y-%m-%dT%H:%i:00.000Z')`), 'created_at'],
+          [Sequelize.literal(`DATE_FORMAT(updated_at, '%Y-%m-%dT%H:%i:00.000Z')`), 'updated_at'],
+        ],
+      },
+      order: [
+        ['id', 'ASC'] // or 'DESC' if you want descending order
+      ]
+    };
+
+    return await paginateUsers(findOptions, page, perPage);
+  } catch (error) {
+    console.error('Error fetching employees:', error);
+    throw new Error("Error fetching employees");
+  }
+};
+
+// Updated paginated query for admins
+const userGetAdmins = async (parent, args) => {
+  const { userToken, pagination = {} } = args;
+  const { page = 1, perPage = 10 } = pagination;
+  
+  // Validate pagination parameters
+  if (page < 1) {
+    throw new Error("Page must be greater than 0");
+  }
+  
+  if (perPage < 1 || perPage > 100) {
+    throw new Error("PerPage must be between 1 and 100");
+  }
+  
+  const tokenData = validateUserToken(userToken);
+  if (!tokenData) {
+    throw new Error("AuthError: invalid user token");
+  }
+
+  const authUser = await UsersModel.findByPk(tokenData.userId);
+  if (!authUser || authUser.is_super !== 1) {
+    throw new Error("PermissionError: Admin access required");
+  }
+
+  try {
+    const findOptions = {
+      where: {
+        is_super: 1,
+        status: 'Active',
+        deleted_at: null,
+      },
+      attributes: {
+        include: [
+          [Sequelize.literal(`DATE_FORMAT(created_at, '%Y-%m-%dT%H:%i:00.000Z')`), 'created_at'],
+          [Sequelize.literal(`DATE_FORMAT(updated_at, '%Y-%m-%dT%H:%i:00.000Z')`), 'updated_at'],
+        ],
+      },
+    };
+
+    return await paginateUsers(findOptions, page, perPage);
+  } catch (error) {
+    console.error('Error fetching admins:', error);
+    throw new Error("Error fetching admins");
+  }
+};
+
+// Keep backward compatibility for userGet100
 const userGet100 = async (parent, args) => {
   const { userToken } = args;
   
@@ -197,77 +434,6 @@ const userGet100 = async (parent, args) => {
   } catch (error) {
     console.error('Error fetching users:', error);
     throw new Error("Error fetching users");
-  }
-};
-
-const userGetActiveEmployees = async (parent, args) => {
-  const { userToken } = args;
-  
-  const tokenData = validateUserToken(userToken);
-  if (!tokenData) {
-    throw new Error("AuthError: invalid user token");
-  }
-
-  try {
-    const users = await UsersModel.findAll({
-      limit: 100,
-      where: {
-        is_employee: 1,
-        status: 'Active',
-        deleted_at: null,
-      },
-      attributes: {
-        include: [
-          [Sequelize.literal(`DATE_FORMAT(created_at, '%Y-%m-%dT%H:%i:00.000Z')`), 'created_at'],
-          [Sequelize.literal(`DATE_FORMAT(updated_at, '%Y-%m-%dT%H:%i:00.000Z')`), 'updated_at'],
-        ],
-      },
-      order: [['created_at', 'DESC']],
-      raw: true,
-    });
-
-    return users;
-  } catch (error) {
-    console.error('Error fetching employees:', error);
-    throw new Error("Error fetching employees");
-  }
-};
-
-const userGetAdmins = async (parent, args) => {
-  const { userToken } = args;
-  
-  const tokenData = validateUserToken(userToken);
-  if (!tokenData) {
-    throw new Error("AuthError: invalid user token");
-  }
-
-  const authUser = await UsersModel.findByPk(tokenData.userId);
-  if (!authUser || authUser.is_super !== 1) {
-    throw new Error("PermissionError: Admin access required");
-  }
-
-  try {
-    const users = await UsersModel.findAll({
-      limit: 100,
-      where: {
-        is_super: 1,
-        status: 'Active',
-        deleted_at: null,
-      },
-      attributes: {
-        include: [
-          [Sequelize.literal(`DATE_FORMAT(created_at, '%Y-%m-%dT%H:%i:00.000Z')`), 'created_at'],
-          [Sequelize.literal(`DATE_FORMAT(updated_at, '%Y-%m-%dT%H:%i:00.000Z')`), 'updated_at'],
-        ],
-      },
-      order: [['created_at', 'DESC']],
-      raw: true,
-    });
-
-    return users;
-  } catch (error) {
-    console.error('Error fetching admins:', error);
-    throw new Error("Error fetching admins");
   }
 };
 
@@ -464,10 +630,12 @@ const resolvers = {
   Query: {
     userValidateToken,
     userGetOne,
+    userSearch,
     userGetByEmail,
-    userGet100,
+    userGetAll, // New paginated query
     userGetActiveEmployees,
     userGetAdmins,
+    userGet100, // Keep for backward compatibility
   },
   Mutation: {
     userLogin,
