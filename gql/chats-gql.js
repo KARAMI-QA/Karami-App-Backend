@@ -14,7 +14,7 @@ import {
 } from "../models/messages-model.js";
 import { graphqlPubsub } from "../app-server/pubsub.js";
 import { validateUserToken } from "./users-gql.js";
-import { generateUploadURL, generateDownloadURL } from "../utils/gcs-helper.js";
+import { generateUploadURL, compressUploadedFile } from "../utils/gcs-helper.js";
 import crypto from "crypto";
 import sequelize from "../mysql/connection.js";
 
@@ -60,6 +60,16 @@ const typeDef = gql`
     unread_count: Int
     other_participant: ChatParticipant
   }
+
+  type CompressFileResponse {
+  success: Boolean!
+  message: String!
+  file_name: String
+  public_url: String
+  original_size_mb: Float
+  compressed_size_mb: Float
+  reduction_percent: Float
+}
 
   type MessageRead {
     user_id: ID!
@@ -126,15 +136,26 @@ const typeDef = gql`
     chatLeaveGroup(userToken: String!, chatId: ID!): Boolean!
     chatUpdateName(userToken: String!, chatId: ID!, name: String!): Chat!
     chatDeleteChat(userToken: String!, chatId: ID!): Boolean!
+    chatCompressUploadedFile(userToken: String!, file_name: String!): CompressFileResponse!
   }
 
   type Subscription {
     messageReceived(userToken: String!): Message
+    messageStatusChanged(userToken: String!): Message!
   }
 `;
 
 // Subscription topics
 const MESSAGE_RECEIVED_TOPIC = 'message_received';
+const MESSAGE_STATUS_CHANGED_TOPIC = 'message_status_changed';
+
+const publishMessageStatusChange = async (message, userIds) => {
+  userIds.forEach(userId => {
+    graphqlPubsub.publish(`${MESSAGE_STATUS_CHANGED_TOPIC}_${userId}`, {
+      messageStatusChanged: message
+    });
+  });
+};
 
 // Helper function to get user ID from token
 const getUserIdFromToken = (userToken) => {
@@ -301,37 +322,107 @@ const chatGetUnreadCount = async (parent, args) => {
 const chatGenerateUploadURL = async (parent, args) => {
   const { userToken, file_name, content_type } = args;
   const userId = getUserIdFromToken(userToken);
-  
+
   const allowedTypes = [
-    'image/jpeg', 'image/png', 'image/gif', 'image/webp',
-    'video/mp4', 'video/mpeg', 'video/quicktime',
-    'audio/mpeg', 'audio/mp3', 'audio/wav',
-    'application/pdf', 'application/msword', 
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp',
+    'video/mp4', 'video/mpeg', 'video/quicktime', 'video/x-msvideo', 
+    'video/x-matroska', 'video/webm', 'video/x-flv',
+    'audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/aac', 'audio/mp4',
+    'audio/ogg', 'audio/flac',
+    'application/pdf', 'application/msword',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'text/plain', 'application/rtf', 'application/vnd.oasis.opendocument.text',
+    'application/vnd.ms-excel',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/vnd.ms-powerpoint',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation'
   ];
-  
+
   if (!allowedTypes.includes(content_type)) {
     throw new Error("Unsupported file type");
   }
-  
+
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
   const timestamp = Date.now();
   const randomString = crypto.randomBytes(8).toString('hex');
   const sanitizedFileName = file_name.replace(/[^a-zA-Z0-9.-]/g, '_');
-  const finalFileName = `chat_media/${userId}/${timestamp}_${randomString}_${sanitizedFileName}`;
   
+  // Get file extension - FIXED: Handle file names with spaces and special chars
+  const originalFileName = file_name.replace(/[^a-zA-Z0-9.]/g, '_');
+  const extension = originalFileName.split('.').pop().toLowerCase();
+  
+  // Determine file category and subfolder - UPDATED with more extensions
+  const imageExtensions = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff', 'tif'];
+  const videoExtensions = ['mp4', 'mov', 'avi', 'mkv', 'webm', 'flv', 'wmv', 'm4v', '3gp', 'mpg', 'mpeg'];
+  const audioExtensions = ['mp3', 'wav', 'aac', 'm4a', 'ogg', 'flac', 'wma'];
+  const docExtensions = [
+    'pdf', 'doc', 'docx', 'txt', 'rtf', 'odt', 
+    'xls', 'xlsx', 'ppt', 'pptx', 'csv'
+  ];
+
+  let subfolder = '';
+  let prefix = '';
+  
+  // Check by content_type first (more reliable)
+  if (content_type.startsWith('image/') || imageExtensions.includes(extension)) {
+    subfolder = 'photo';
+  } else if (content_type.startsWith('video/') || videoExtensions.includes(extension)) {
+    subfolder = 'video';
+  } else if (content_type.startsWith('audio/') || audioExtensions.includes(extension)) {
+    subfolder = 'audio';
+  } else if (docExtensions.includes(extension)) {
+    subfolder = 'document';
+    if (['pdf'].includes(extension)) {
+      prefix = 'pdf_';
+    } else if (['doc', 'docx', 'txt', 'rtf', 'odt'].includes(extension)) {
+      prefix = 'doc_';
+    } else if (['xls', 'xlsx', 'csv'].includes(extension)) {
+      prefix = 'xls_';
+    } else if (['ppt', 'pptx'].includes(extension)) {
+      prefix = 'ppt_';
+    }
+  } else {
+    subfolder = 'other';
+  }
+
+  const finalFileName = `${year}/${month}/chat_media/${userId}/${subfolder}/${timestamp}_${randomString}_${prefix}${sanitizedFileName}`;
+
+  // Determine if compression is supported for this file type - FIXED
+  let shouldCompress = false;
+  let maxSizeMB = null;
+  
+  if (content_type.startsWith('image/') || imageExtensions.includes(extension)) {
+    shouldCompress = true;
+    console.log(`🖼️ Image file detected: ${content_type}`);
+  } else if (content_type.startsWith('video/') || videoExtensions.includes(extension)) {
+    shouldCompress = true;
+    maxSizeMB = 5;
+    console.log(`🎥 Video file detected: ${content_type}, max size: 5MB`);
+  }
+  
+  console.log(`📊 Compression settings for ${file_name}: shouldCompress=${shouldCompress}, maxSizeMB=${maxSizeMB}`);
+
   const uploadData = await generateUploadURL({
     fileName: finalFileName,
     contentType: content_type,
-    expiresIn: 15 * 60
+    expiresIn: 15 * 60,
+    shouldCompress
   });
-  
+
   return {
     url: uploadData.signedUrl,
     file_name: finalFileName,
     public_url: uploadData.publicUrl,
-    signed_url_expires: new Date(Date.now() + 15 * 60 * 1000).toISOString()
+    signed_url_expires: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+    category: subfolder.toUpperCase(),
+    compression_supported: shouldCompress,
+    max_size_mb: maxSizeMB,
+    compress_after_upload: shouldCompress
   };
 };
+
 
 // Mutation Resolvers
 const chatSendMessage = async (parent, args) => {
@@ -340,8 +431,39 @@ const chatSendMessage = async (parent, args) => {
   
   let { chat_id, receiver_id, content, media_url, media_type } = input;
   
-  // console.log('chatSendMessage called:', { userId, chat_id, receiver_id });
+  // Handle null media_url (convert to null instead of string 'null')
+  if (media_url === 'null' || media_url === null || media_url === undefined) {
+    media_url = null;
+  }
   
+  // If media_url is provided but media_type is still NONE, try to detect type
+  if (media_url && media_type === 'NONE') {
+    const extension = media_url.split('.').pop().toLowerCase();
+    const imageExtensions = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
+    const videoExtensions = ['mp4', 'mov', 'avi', 'mkv'];
+    const audioExtensions = ['mp3', 'wav', 'aac', 'm4a'];
+    const docExtensions = ['pdf', 'doc', 'docx', 'txt'];
+    
+    if (imageExtensions.includes(extension)) {
+      media_type = 'IMAGE';
+    } else if (videoExtensions.includes(extension)) {
+      media_type = 'VIDEO';
+    } else if (audioExtensions.includes(extension)) {
+      media_type = 'AUDIO';
+    } else if (docExtensions.includes(extension)) {
+      media_type = 'DOCUMENT';
+    }
+  }
+  
+  console.log('chatSendMessage called:', { 
+    userId, 
+    chat_id, 
+    receiver_id, 
+    hasMedia: !!media_url,
+    media_type 
+  });
+  
+  // Rest of the function remains the same...
   if (!chat_id && receiver_id) {
     const chat = await findOrCreateDirectChat({ 
       userId1: userId, 
@@ -366,9 +488,9 @@ const chatSendMessage = async (parent, args) => {
   const message = await createMessage({
     chatId: chat_id,
     senderId: userId,
-    content,
+    content: content || null,
     mediaUrl: media_url,
-    mediaType: media_type
+    mediaType: media_type || 'NONE'
   });
   
   // Get the chat again to ensure we have correct other_participant for the recipient
@@ -377,15 +499,14 @@ const chatSendMessage = async (parent, args) => {
     currentUserId: receiver_id || participants.find(p => p.id !== userId)?.id 
   });
   
-  console.log('Message created with chat data:', {
+  console.log('Message created:', {
     messageId: message.id,
-    hasChat: !!message.chat,
-    hasOtherParticipant: !!recipientChat?.other_participant,
-    otherParticipantName: recipientChat?.other_participant?.name
+    hasMedia: !!media_url,
+    mediaType: media_type,
+    hasChat: !!message.chat
   });
   
   // Publish message to all participants EXCEPT the sender
-  // Each user gets their own subscription channel with their correct other_participant
   participants.forEach(participant => {
     if (String(participant.id) !== String(userId)) {
       console.log('Publishing message to participant:', participant.id);
@@ -416,11 +537,89 @@ const chatSendMessage = async (parent, args) => {
   return message;
 };
 
+const chatCompressUploadedFile = async (parent, args) => {
+  const { userToken, file_name } = args;
+  const userId = getUserIdFromToken(userToken);
+  
+  // Verify the file belongs to this user (path contains user ID)
+  if (!file_name.includes(`/${userId}/`)) {
+    throw new Error("PermissionError: You can only compress your own files");
+  }
+  
+  try {
+    const result = await compressUploadedFile(file_name);
+    
+    if (result.compressionInfo) {
+      return {
+        success: true,
+        message: 'File compressed successfully',
+        file_name: result.fileName,
+        public_url: result.publicUrl,
+        original_size_mb: (result.compressionInfo.originalSize / (1024 * 1024)).toFixed(2),
+        compressed_size_mb: (result.compressionInfo.compressedSize / (1024 * 1024)).toFixed(2),
+        reduction_percent: parseFloat(result.compressionInfo.reduction)
+      };
+    } else {
+      return {
+        success: false,
+        message: 'Compression not applied (unsupported file type or no compression needed)',
+        file_name: result.fileName,
+        public_url: result.publicUrl,
+        original_size_mb: (result.size / (1024 * 1024)).toFixed(2),
+        compressed_size_mb: (result.size / (1024 * 1024)).toFixed(2),
+        reduction_percent: 0
+      };
+    }
+  } catch (error) {
+    console.error('Error compressing file:', error);
+    return {
+      success: false,
+      message: `Compression failed: ${error.message}`,
+      file_name: null,
+      public_url: null,
+      original_size_mb: 0,
+      compressed_size_mb: 0,
+      reduction_percent: 0
+    };
+  }
+};
+
 const chatMarkAsDelivered = async (parent, args) => {
   const { userToken, chatId } = args;
   const userId = getUserIdFromToken(userToken);
   
+  // Mark messages as delivered
   await markMessagesAsDelivered({ chatId, userId });
+  
+  // Get the chat to find messages that were updated
+  const messages = await sequelize.query(
+    `
+    SELECT m.*
+    FROM messages m
+    WHERE m.chat_id = :chatId
+      AND m.sender_id != :userId
+      AND m.status = 'DELIVERED'
+      AND m.updated_at >= DATE_SUB(NOW(), INTERVAL 5 SECOND)
+    ORDER BY m.updated_at DESC
+    LIMIT 10;
+    `,
+    {
+      type: Sequelize.QueryTypes.SELECT,
+      replacements: { chatId, userId }
+    }
+  );
+  
+  // Get chat participants
+  const chat = await getChatById({ chatId });
+  const participants = parseParticipants(chat.participants);
+  const participantIds = participants.map(p => String(p.id));
+  
+  // Notify about each updated message
+  for (const message of messages) {
+    const fullMessage = await getMessageById({ messageId: message.id });
+    await publishMessageStatusChange(fullMessage, participantIds);
+  }
+  
   return true;
 };
 
@@ -428,16 +627,28 @@ const chatMarkAsSeen = async (parent, args) => {
   const { userToken, messageId } = args;
   const userId = getUserIdFromToken(userToken);
   
+  // Mark as seen (this already updates status to 'SEEN')
   await markMessageAsSeen({ messageId, userId });
   
-  // Get message and notify sender that their message was seen
+  // Get the updated message with all details
   const message = await getMessageById({ messageId });
   
-  // Notify ONLY the sender that their message was seen
+  // Get chat participants to notify
+  const chat = await getChatById({ chatId: message.chat_id });
+  const participants = parseParticipants(chat.participants);
+  
+  // Notify ALL participants about the status change
+  // This includes the sender (to update their UI) and the reader
+  const participantIds = participants.map(p => String(p.id));
+  
+  // Publish status change to all participants
+  await publishMessageStatusChange(message, participantIds);
+  
+  // Also notify sender through messageReceived (for backward compatibility)
   if (message && message.sender_id) {
     console.log('Notifying sender that message was seen:', message.sender_id);
     graphqlPubsub.publish(`${MESSAGE_RECEIVED_TOPIC}_${message.sender_id}`, {
-      messageReceived: message // This will contain updated read status
+      messageReceived: message
     });
   }
   
@@ -719,6 +930,7 @@ const resolvers = {
     chatLeaveGroup,
     chatUpdateName,
     chatDeleteChat,
+    chatCompressUploadedFile,
   },
   Subscription: {
     messageReceived: {
@@ -742,7 +954,26 @@ const resolvers = {
         // console.log('📦 Subscription: Resolving messageReceived payload');
         return payload.messageReceived;
       }
+    },
+    messageStatusChanged: {  // Add this new resolver
+      subscribe: async (_, args) => {
+        const { userToken } = args;
+        
+        try {
+          const userId = getUserIdFromToken(userToken);
+          console.log(`✅ Subscription: User ${userId} subscribed to messageStatusChanged`);
+          return graphqlPubsub.asyncIterableIterator(`${MESSAGE_STATUS_CHANGED_TOPIC}_${userId}`);
+        } catch (error) {
+          console.error('❌ Subscription authentication error:', error.message);
+          throw new Error("AuthError: invalid user token for subscription");
+        }
+      },
+      resolve: (payload) => {
+        console.log('📦 Subscription: Resolving messageStatusChanged payload');
+        return payload.messageStatusChanged;
+      }
     }
+  
   },
 };
 

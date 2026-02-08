@@ -2,8 +2,16 @@ import gql from "graphql-tag";
 import { Sequelize } from "sequelize";
 import UsersModel, { getEmail, getOne, getSearch } from "../models/users-model.js";
 import cryptoHelper from "../utils/crypto-helper.js";
+import { getUserRoles } from "../models/approval-logs-model.js"; 
 
 const typeDef = gql`
+  type UserRole {
+    role_id: ID!
+    role_name: String!
+    guard_name: String!
+    description: String
+  }
+
   type User {
     id: ID!
     name: String
@@ -31,6 +39,7 @@ const typeDef = gql`
     deleted_at: String
     created_at: String!
     updated_at: String!
+    roles: [UserRole]!  
   }
 
   type PaginationInfo {
@@ -89,6 +98,9 @@ const typeDef = gql`
     userGet100(userToken: String!): [User] @deprecated(reason: "Use userGetAll with pagination instead")
     
     userValidateToken(userToken: String!): Boolean
+    
+    # New query to get user roles
+    userGetRoles(userToken: String!): [UserRole]
   }
 
   type Mutation {
@@ -97,6 +109,8 @@ const typeDef = gql`
     userResetPassword(resetInput: ResetPasswordInput!): Boolean!
   }
 `;
+
+
 const generateUserToken = (user) => {
   const timestamp = Date.now();
   const random = Math.random().toString(36).substring(2, 15);
@@ -120,61 +134,7 @@ export const validateUserToken = (userToken) => {
   }
 };
 
-// Common pagination helper function
-const paginateUsers = async (findOptions, page = 1, perPage = 10) => {
-  // Calculate offset
-  const offset = (page - 1) * perPage;
-  
-  // Get total count
-  const countOptions = { ...findOptions };
-  delete countOptions.limit;
-  delete countOptions.offset;
-  delete countOptions.order;
-  delete countOptions.attributes;
-  
-  const totalItems = await UsersModel.count(countOptions);
-  
-  // Calculate total pages
-  const totalPages = Math.ceil(totalItems / perPage);
-  
-  // Get paginated data
-  const users = await UsersModel.findAll({
-    ...findOptions,
-    limit: perPage,
-    offset: offset,
-    order: findOptions.order || [['created_at', 'DESC']],
-    raw: true,
-  });
-  
-  // Format dates for each user
-  const formattedUsers = users.map(user => ({
-    ...user,
-    created_at: user.created_at ? 
-      new Date(user.created_at).toISOString().replace('T', ' ').substring(0, 19) : 
-      null,
-    updated_at: user.updated_at ? 
-      new Date(user.updated_at).toISOString().replace('T', ' ').substring(0, 19) : 
-      null,
-    email_verified_at: user.email_verified_at ? 
-      new Date(user.email_verified_at).toISOString().replace('T', ' ').substring(0, 19) : 
-      null,
-    phone_verified_at: user.phone_verified_at ? 
-      new Date(user.phone_verified_at).toISOString().replace('T', ' ').substring(0, 19) : 
-      null,
-  }));
-  
-  return {
-    users: formattedUsers,
-    pagination: {
-      currentPage: page,
-      perPage: perPage,
-      totalItems: totalItems,
-      totalPages: totalPages,
-      hasNextPage: page < totalPages,
-      hasPreviousPage: page > 1,
-    }
-  };
-};
+
 
 // Query Resolvers
 const userValidateToken = async (parent, args) => {
@@ -209,7 +169,12 @@ const userGetOne = async (parent, args) => {
 
   try {
     const user = await getOne({ userId: tokenData.userId });
-    return user;
+    const roles = await getUserRoles({ userId: tokenData.userId });
+    
+    return {
+      ...user,
+      roles: roles
+    };
   } catch (error) {
     throw new Error("User not found");
   }
@@ -234,11 +199,210 @@ const userGetByEmail = async (parent, args) => {
 
   try {
     const user = await getEmail({ email });
-    return user;
+    const roles = await getUserRoles({ userId: user.id });
+    
+    return {
+      ...user,
+      roles: roles
+    };
   } catch (error) {
     throw new Error("User not found");
   }
 };
+
+// New query to get user roles
+const userGetRoles = async (parent, args) => {
+  const { userToken } = args;
+  
+  const tokenData = validateUserToken(userToken);
+  if (!tokenData) {
+    throw new Error("AuthError: invalid user token");
+  }
+
+  try {
+    const roles = await getUserRoles({ userId: tokenData.userId });
+    return roles;
+  } catch (error) {
+    console.error('Error fetching user roles:', error);
+    return [];
+  }
+};
+
+
+const paginateUsers = async (findOptions, page = 1, perPage = 10) => {
+  // Calculate offset
+  const offset = (page - 1) * perPage;
+  
+  // Get total count
+  const countOptions = { ...findOptions };
+  delete countOptions.limit;
+  delete countOptions.offset;
+  delete countOptions.order;
+  delete countOptions.attributes;
+  
+  const totalItems = await UsersModel.count(countOptions);
+  
+  // Calculate total pages
+  const totalPages = Math.ceil(totalItems / perPage);
+  
+  // Get paginated data
+  const users = await UsersModel.findAll({
+    ...findOptions,
+    limit: perPage,
+    offset: offset,
+    order: findOptions.order || [['created_at', 'DESC']],
+    raw: true,
+  });
+  
+  // Format dates and fetch roles for each user
+  const formattedUsers = await Promise.all(users.map(async (user) => {
+    const roles = await getUserRoles({ userId: user.id });
+    
+    return {
+      ...user,
+      roles: roles,
+      created_at: user.created_at ? 
+        new Date(user.created_at).toISOString().replace('T', ' ').substring(0, 19) : 
+        null,
+      updated_at: user.updated_at ? 
+        new Date(user.updated_at).toISOString().replace('T', ' ').substring(0, 19) : 
+        null,
+      email_verified_at: user.email_verified_at ? 
+        new Date(user.email_verified_at).toISOString().replace('T', ' ').substring(0, 19) : 
+        null,
+      phone_verified_at: user.phone_verified_at ? 
+        new Date(user.phone_verified_at).toISOString().replace('T', ' ').substring(0, 19) : 
+        null,
+    };
+  }));
+  
+  return {
+    users: formattedUsers,
+    pagination: {
+      currentPage: page,
+      perPage: perPage,
+      totalItems: totalItems,
+      totalPages: totalPages,
+      hasNextPage: page < totalPages,
+      hasPreviousPage: page > 1,
+    }
+  };
+};
+
+// Update Mutation Resolver for userLogin to include roles
+const userLogin = async (parent, args) => {
+  const { loginInput } = args;
+  const { email, password, device_type } = loginInput;
+
+  try {
+    // console.log('Login attempt for email:', email);
+    // console.log('Provided password length:', password ? password.length : 'missing');
+    
+    // Validate input
+    if (!password || typeof password !== 'string') {
+      console.error('Invalid password provided');
+      return {
+        success: false,
+        message: "Invalid email or password",
+        userToken: null,
+        user: null
+      };
+    }
+
+    // Find user by email
+    const user = await getEmail({ email }).catch(() => null);
+    
+    if (!user) {
+      console.log('User not found with email:', email);
+      return {
+        success: false,
+        message: "Invalid email or password",
+        userToken: null,
+        user: null
+      };
+    }
+
+    // console.log('Found user ID:', user.id);
+    // console.log('User status:', user.status);
+    // console.log('Hash format check:', user.password ? `Starts with: ${user.password.substring(0, 10)}...` : 'No password');
+    
+    // Check user status
+    if (user.status !== 'Active') {
+      return {
+        success: false,
+        message: `Account is ${user.status}. Please contact support.`,
+        userToken: null,
+        user: null
+      };
+    }
+
+    // Check if user is deleted
+    if (user.deleted_at) {
+      return {
+        success: false,
+        message: "Account not found",
+        userToken: null,
+        user: null
+      };
+    }
+
+    // Compare password using cryptoHelper
+    // console.log('Attempting password comparison...');
+    const passwordMatch = await cryptoHelper.comparePassword(password, user.password);
+    // console.log('Password match result:', passwordMatch);
+    
+    if (!passwordMatch) {
+      console.log('Password comparison failed');
+      return {
+        success: false,
+        message: "Invalid email or password",
+        userToken: null,
+        user: null
+      };
+    }
+
+    // console.log('Password verified, generating token...');
+    
+    // Generate user token
+    const userToken = generateUserToken(user);
+
+    // Fetch user roles
+    const userRoles = await getUserRoles({ userId: user.id });
+
+    // Update last login timestamp
+    await UsersModel.update(
+      {
+        email_verified_at: user.email_verified_at || new Date(),
+        updated_at: new Date()
+      },
+      { where: { id: user.id } }
+    );
+
+    // Remove password from response
+    const userResponse = { 
+      ...user,
+      roles: userRoles  // Add roles to response
+    };
+    delete userResponse.password;
+
+    return {
+      success: true,
+      message: "Login successful",
+      userToken,
+      user: userResponse
+    };
+  } catch (error) {
+    console.error('Login error:', error.message);
+    console.error('Error stack:', error.stack);
+    return {
+      success: false,
+      message: "Login failed. Please try again.",
+      userToken: null,
+      user: null
+    };
+  }
+};
+// Query Resolvers
 
 const userSearch = async (parent, args) => {
   const { userToken, searchTerm } = args;
@@ -438,112 +602,7 @@ const userGet100 = async (parent, args) => {
 };
 
 // Mutation Resolvers
-const userLogin = async (parent, args) => {
-  const { loginInput } = args;
-  const { email, password, device_type } = loginInput;
 
-  try {
-    // console.log('Login attempt for email:', email);
-    // console.log('Provided password length:', password ? password.length : 'missing');
-    
-    // Validate input
-    if (!password || typeof password !== 'string') {
-      console.error('Invalid password provided');
-      return {
-        success: false,
-        message: "Invalid email or password",
-        userToken: null,
-        user: null
-      };
-    }
-
-    // Find user by email
-    const user = await getEmail({ email }).catch(() => null);
-    
-    if (!user) {
-      console.log('User not found with email:', email);
-      return {
-        success: false,
-        message: "Invalid email or password",
-        userToken: null,
-        user: null
-      };
-    }
-
-    // console.log('Found user ID:', user.id);
-    // console.log('User status:', user.status);
-    // console.log('Hash format check:', user.password ? `Starts with: ${user.password.substring(0, 10)}...` : 'No password');
-    
-    // Check user status
-    if (user.status !== 'Active') {
-      return {
-        success: false,
-        message: `Account is ${user.status}. Please contact support.`,
-        userToken: null,
-        user: null
-      };
-    }
-
-    // Check if user is deleted
-    if (user.deleted_at) {
-      return {
-        success: false,
-        message: "Account not found",
-        userToken: null,
-        user: null
-      };
-    }
-
-    // Compare password using cryptoHelper
-    // console.log('Attempting password comparison...');
-    const passwordMatch = await cryptoHelper.comparePassword(password, user.password);
-    // console.log('Password match result:', passwordMatch);
-    
-    if (!passwordMatch) {
-      console.log('Password comparison failed');
-      return {
-        success: false,
-        message: "Invalid email or password",
-        userToken: null,
-        user: null
-      };
-    }
-
-    // console.log('Password verified, generating token...');
-    
-    // Generate user token
-    const userToken = generateUserToken(user);
-
-    // Update last login timestamp
-    await UsersModel.update(
-      {
-        email_verified_at: user.email_verified_at || new Date(),
-        updated_at: new Date()
-      },
-      { where: { id: user.id } }
-    );
-
-    // Remove password from response
-    const userResponse = { ...user };
-    delete userResponse.password;
-
-    return {
-      success: true,
-      message: "Login successful",
-      userToken,
-      user: userResponse
-    };
-  } catch (error) {
-    console.error('Login error:', error.message);
-    console.error('Error stack:', error.stack);
-    return {
-      success: false,
-      message: "Login failed. Please try again.",
-      userToken: null,
-      user: null
-    };
-  }
-};
 
 const userForgotPassword = async (parent, args) => {
   const { forgotInput } = args;
@@ -636,6 +695,7 @@ const resolvers = {
     userGetActiveEmployees,
     userGetAdmins,
     userGet100, // Keep for backward compatibility
+    userGetRoles, // Add new query
   },
   Mutation: {
     userLogin,

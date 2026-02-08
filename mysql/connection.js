@@ -30,22 +30,5 @@ const sequelize = new Sequelize(
   }
 );
 
-// const testDbConnection = async () => {
-//   try {
-//     await sequelize.authenticate();
-//     console.log(`✅ Connected to Google Cloud SQL: ${process.env.MYSQL_HOST}:${process.env.MYSQL_PORT}/${process.env.MYSQL_DATABASE}`);
-//     return true;
-//   } catch (error) {
-//     console.error("❌ Unable to connect to Google Cloud SQL:", error.message);
-//     console.log("⚠️  Please verify:");
-//     console.log("   1. IP address is added to Cloud SQL authorized networks");
-//     console.log("   2. Database credentials are correct");
-//     console.log("   3. SSL connection is properly configured");
-//     throw error;
-//   }
-// };
-
-// // Test connection on import
-// testDbConnection();
 
 export default sequelize;

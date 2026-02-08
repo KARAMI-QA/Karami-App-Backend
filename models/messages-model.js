@@ -35,63 +35,114 @@ const MessagesModel = sequelize.define(
 
 export default MessagesModel;
 
-export const getMessageById = async ({ messageId }) => {
-  try {
-    const messages = await sequelize.query(
-      `
-      SELECT m.*,
-        DATE_FORMAT(m.created_at, '%Y-%m-%dT%H:%i:00.000Z') AS created_at,
-        DATE_FORMAT(m.updated_at, '%Y-%m-%dT%H:%i:00.000Z') AS updated_at,
-        
-        -- Sender info
-        JSON_OBJECT(
-          'id', u.id,
-          'name', COALESCE(u.name, CONCAT(u.first_name, ' ', u.last_name)),
-          'email', u.email,
-          'image', u.image
-        ) as sender,
-        
-        -- Chat info
-        JSON_OBJECT(
-          'id', c.id,
-          'type', c.type,
-          'name', c.name
-        ) as chat,
-        
-        -- Get read status for participants
-        (
-          SELECT JSON_ARRAYAGG(
-            JSON_OBJECT(
-              'user_id', mr.user_id,
-              'read_at', DATE_FORMAT(mr.read_at, '%Y-%m-%dT%H:%i:00.000Z')
+export const getMessageById = async ({ messageId, currentUserId = null }) => {  // Add currentUserId parameter
+    try {
+      const messages = await sequelize.query(
+        `
+        SELECT m.*,
+          DATE_FORMAT(m.created_at, '%Y-%m-%dT%H:%i:00.000Z') AS created_at,
+          DATE_FORMAT(m.updated_at, '%Y-%m-%dT%H:%i:00.000Z') AS updated_at,
+          
+          -- Sender info
+          JSON_OBJECT(
+            'id', u.id,
+            'name', COALESCE(u.name, CONCAT(u.first_name, ' ', u.last_name)),
+            'email', u.email,
+            'image', u.image
+          ) as sender,
+          
+          -- Get chat info with unread count for current user
+          JSON_OBJECT(
+            'id', c.id,
+            'type', c.type,
+            'name', c.name,
+            'is_active', c.is_active,
+            'last_message_id', c.last_message_id,
+            'last_message_at', DATE_FORMAT(c.last_message_at, '%Y-%m-%dT%H:%i:00.000Z'),
+            'created_by', c.created_by,
+            'deleted_at', DATE_FORMAT(c.deleted_at, '%Y-%m-%dT%H:%i:00.000Z'),
+            'created_at', DATE_FORMAT(c.created_at, '%Y-%m-%dT%H:%i:00.000Z'),
+            'updated_at', DATE_FORMAT(c.updated_at, '%Y-%m-%dT%H:%i:00.000Z'),
+            -- Calculate unread count for current user
+            'unread_count', (
+              SELECT COUNT(*)
+              FROM messages m2
+              WHERE m2.chat_id = c.id 
+                AND m2.status = 'SENT'
+                AND m2.sender_id != :currentUserId
+                AND NOT EXISTS (
+                  SELECT 1 FROM message_reads mr 
+                  WHERE mr.message_id = m2.id 
+                    AND mr.user_id = :currentUserId
+                )
             )
-          )
-          FROM message_reads mr
-          WHERE mr.message_id = m.id
-        ) as read_by
-        
-      FROM messages m
-      LEFT JOIN users u ON m.sender_id = u.id
-      LEFT JOIN chats c ON m.chat_id = c.id
-      WHERE m.id = :messageId
-      LIMIT 1;
-      `,
-      {
-        type: QueryTypes.SELECT,
-        replacements: { messageId }
+          ) as chat,
+          
+          -- Get read status for participants
+          (
+            SELECT JSON_ARRAYAGG(
+              JSON_OBJECT(
+                'user_id', mr.user_id,
+                'read_at', DATE_FORMAT(mr.read_at, '%Y-%m-%dT%H:%i:00.000Z')
+              )
+            )
+            FROM message_reads mr
+            WHERE mr.message_id = m.id
+          ) as read_by
+          
+        FROM messages m
+        LEFT JOIN users u ON m.sender_id = u.id
+        LEFT JOIN chats c ON m.chat_id = c.id
+        WHERE m.id = :messageId
+        LIMIT 1;
+        `,
+        {
+          type: QueryTypes.SELECT,
+          replacements: { messageId, currentUserId }  // Pass currentUserId
+        }
+      );
+  
+      if (messages.length === 0) {
+        throw new Error(`No message found with id: ${messageId}`);
       }
-    );
-
-    if (messages.length === 0) {
-      throw new Error(`No message found with id: ${messageId}`);
+  
+      const message = messages[0];
+      
+      // Parse JSON strings
+      if (message.sender && typeof message.sender === 'string') {
+        try {
+          message.sender = JSON.parse(message.sender);
+        } catch (e) {
+          console.error('Error parsing sender JSON:', e);
+        }
+      }
+      
+      if (message.chat && typeof message.chat === 'string') {
+        try {
+          message.chat = JSON.parse(message.chat);
+        } catch (e) {
+          console.error('Error parsing chat JSON:', e);
+          message.chat = null;
+        }
+      }
+      
+      if (message.read_by && typeof message.read_by === 'string') {
+        try {
+          message.read_by = JSON.parse(message.read_by);
+        } catch (e) {
+          console.error('Error parsing read_by JSON:', e);
+          message.read_by = [];
+        }
+      } else if (!message.read_by) {
+        message.read_by = [];
+      }
+  
+      return message;
+    } catch (error) {
+      console.error('Error fetching message:', error);
+      throw error;
     }
-
-    return messages[0];
-  } catch (error) {
-    console.error('Error fetching message:', error);
-    throw error;
-  }
-};
+  };
 
 export const getChatMessages = async ({ chatId, limit = 50, offset = 0 }) => {
   try {

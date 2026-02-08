@@ -8,6 +8,7 @@ import { graphqlPubsub } from "./pubsub.js";
 // import registrationsGql from "../gql/registrations-gql.js";
 import usersGql from "../gql/users-gql.js";
 import chatsGql from "../gql/chats-gql.js";
+import approvalLogsGql from "../gql/approval-logs-gql.js";
 
 const { Kind } = graphqllanguage;
 
@@ -180,12 +181,14 @@ const schema = makeExecutableSchema({
     // registrationsGql.typeDef,
     usersGql.typeDef,
     chatsGql.typeDef,
+    approvalLogsGql.typeDef,
   ],
   resolvers: lodashMerge(
     resolvers,
     // registrationsGql.resolvers,
     usersGql.resolvers,
     chatsGql.resolvers,
+    approvalLogsGql.resolvers,
   ),
 });
 

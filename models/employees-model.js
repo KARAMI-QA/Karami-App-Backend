@@ -118,3 +118,30 @@ const EmployeesModel = sequelize.define(
 );
 
 export default EmployeesModel;
+
+
+export const getEmployeeByUserId = async ({ userId }) => {
+    try {
+      const employees = await sequelize.query(
+        `
+        SELECT *
+        FROM employees
+        WHERE user_id = :userId
+        LIMIT 1;
+        `,
+        {
+          type: QueryTypes.SELECT,
+          replacements: { userId }
+        }
+      );
+  
+      if (employees.length === 0) {
+        throw new Error(`No employee found with user ID: ${userId}`);
+      }
+  
+      return employees[0];
+    } catch (error) {
+      console.error('Error fetching employee by user ID:', error);
+      throw error;
+    }
+};
