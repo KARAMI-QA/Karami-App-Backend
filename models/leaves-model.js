@@ -1,4 +1,4 @@
-import { DataTypes } from "sequelize";
+import { DataTypes, QueryTypes } from "sequelize";
 import sequelize from "../mysql/connection.js";
 
 const LeavesModel = sequelize.define(
@@ -52,3 +52,69 @@ const LeavesModel = sequelize.define(
 );
 
 export default LeavesModel;
+
+export const getOneLeavesById = async ({ id }) => {
+    try {
+      const leaves = await sequelize.query(
+        `
+        SELECT *,
+          DATE_FORMAT(start_date, '%Y-%m-%dT%H:%i:00.000Z') AS start_date,
+          DATE_FORMAT(end_date, '%Y-%m-%dT%H:%i:00.000Z') AS end_date,
+          DATE_FORMAT(authorize_date, '%Y-%m-%dT%H:%i:00.000Z') AS authorize_date,
+          DATE_FORMAT(created_at, '%Y-%m-%dT%H:%i:00.000Z') AS created_at, 
+          DATE_FORMAT(updated_at, '%Y-%m-%dT%H:%i:00.000Z') AS updated_at,
+          DATE_FORMAT(deleted_at, '%Y-%m-%dT%H:%i:00.000Z') AS deleted_at
+        FROM leaves
+        WHERE id = :id
+          AND deleted_at IS NULL
+        LIMIT 1;
+        `,
+        {
+          type: QueryTypes.SELECT,
+          replacements: { id }
+        }
+      );
+  
+      if (leaves.length === 0) {
+        throw new Error(`No leave found with id: ${id}`);
+      }
+  
+      return leaves[0];
+    } catch (error) {
+      console.error('Error fetching leave by id:', error);
+      throw error;
+    }
+  };
+
+  export const updateLeaveStatus = async ({ id, status, authorizer_id, authorizer_role, authorize_date }) => {
+    try {
+      const updateData = {
+        status,
+        authorizer_id,
+        authorizer_role,
+        authorize_date,
+        updated_at: new Date()
+      };
+  
+      // Remove undefined/null values
+      Object.keys(updateData).forEach(key => {
+        if (updateData[key] === undefined || updateData[key] === null) {
+          delete updateData[key];
+        }
+      });
+  
+      const [affectedRows] = await LeavesModel.update(updateData, {
+        where: { id }
+      });
+  
+      if (affectedRows === 0) {
+        throw new Error(`No leave found with id: ${id}`);
+      }
+  
+      // Return updated leave
+      return await getOneLeavesById({ id });
+    } catch (error) {
+      console.error('Error updating leave status:', error);
+      throw error;
+    }
+  };

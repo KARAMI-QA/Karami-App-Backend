@@ -142,6 +142,7 @@ const typeDef = gql`
   type Subscription {
     messageReceived(userToken: String!): Message
     messageStatusChanged(userToken: String!): Message!
+     userChatsUpdated(userToken: String!): Chat!
   }
 `;
 
@@ -156,6 +157,43 @@ const publishMessageStatusChange = async (message, userIds) => {
     });
   });
 };
+
+const publishUserChatsUpdate = async (userId) => {
+  try {
+    // Get the updated chats for the user
+    const chats = await getUserChats({ userId });
+    
+    const processedChats = chats.map(chat => {
+      if (chat.participants) {
+        chat.participants = parseParticipants(chat.participants);
+      }
+      
+      if (chat.last_message) {
+        chat.last_message = parseLastMessage(chat.last_message);
+      }
+      
+      if (chat.other_participant && typeof chat.other_participant === 'string') {
+        try {
+          chat.other_participant = JSON.parse(chat.other_participant);
+        } catch (error) {
+          chat.other_participant = null;
+        }
+      }
+      
+      return chat;
+    });
+    
+    // Publish each chat update
+    processedChats.forEach(chat => {
+      graphqlPubsub.publish(`user_chats_updated_${userId}`, {
+        userChatsUpdated: chat
+      });
+    });
+    
+  } catch (error) {
+    console.error('Error publishing chat updates:', error);
+  }
+};  
 
 // Helper function to get user ID from token
 const getUserIdFromToken = (userToken) => {
@@ -240,7 +278,7 @@ const chatGetUserChats = async (parent, args) => {
   
   const chats = await getUserChats({ userId });
   
-  return chats.map(chat => {
+  const processedChats = chats.map(chat => {
     if (chat.participants) {
       chat.participants = parseParticipants(chat.participants);
     }
@@ -259,6 +297,8 @@ const chatGetUserChats = async (parent, args) => {
     
     return chat;
   });
+  
+  return processedChats;
 };
 
 const chatGetMessages = async (parent, args) => {
@@ -533,6 +573,10 @@ const chatSendMessage = async (parent, args) => {
         });
     }
   });
+
+  participants.forEach(participant => {
+    publishUserChatsUpdate(participant.id);
+  });
   
   return message;
 };
@@ -620,6 +664,11 @@ const chatMarkAsDelivered = async (parent, args) => {
     await publishMessageStatusChange(fullMessage, participantIds);
   }
   
+  // ✅ ADD THIS: Trigger chat list updates for all participants
+  participants.forEach(participant => {
+    publishUserChatsUpdate(participant.id);
+  });
+  
   return true;
 };
 
@@ -651,6 +700,10 @@ const chatMarkAsSeen = async (parent, args) => {
       messageReceived: message
     });
   }
+
+  participants.forEach(participant => {
+    publishUserChatsUpdate(participant.id);
+  });
   
   return true;
 };
@@ -672,6 +725,9 @@ const chatCreateDirectChat = async (parent, args) => {
   if (chat.last_message) {
     chat.last_message = parseLastMessage(chat.last_message);
   }
+
+  publishUserChatsUpdate(userId);
+  publishUserChatsUpdate(otherUserId);
   
   return chat;
 };
@@ -719,6 +775,10 @@ const chatCreateGroup = async (parent, args) => {
   if (chat.last_message) {
     chat.last_message = parseLastMessage(chat.last_message);
   }
+
+  allParticipants.forEach(participantId => {
+    publishUserChatsUpdate(participantId);
+  });
   
   return chat;
 };
@@ -756,6 +816,16 @@ const chatAddParticipant = async (parent, args) => {
   // Notify all participants
   const chat = await getChatById({ chatId });
   const participants = parseParticipants(chat.participants);
+  
+  // ✅ ADD THIS: Trigger chat list updates for ALL participants (including new one)
+  participants.forEach(participant => {
+    publishUserChatsUpdate(participant.id);
+  });
+  
+  // Also trigger for the new participant specifically
+  publishUserChatsUpdate(newUserId);
+  
+  // Notify all participants about chat update
   participants.forEach(participant => {
     graphqlPubsub.publish(`${CHAT_UPDATED_TOPIC}_${participant.id}`, {
       chatUpdated: chat
@@ -795,6 +865,15 @@ const chatRemoveParticipant = async (parent, args) => {
       replacements: [chatId, removeUserId]
     }
   );
+
+  participantsBefore
+  .filter(p => p.id !== removeUserId)
+  .forEach(participant => {
+    publishUserChatsUpdate(participant.id);
+  });
+
+// 2. The removed user (they should see this chat disappear from their list)
+publishUserChatsUpdate(removeUserId);
   
   return true;
 };
@@ -810,6 +889,15 @@ const chatLeaveGroup = async (parent, args) => {
       replacements: [chatId, userId]
     }
   );
+
+  publishUserChatsUpdate(userId);
+  
+  // 2. All remaining participants
+  participantsBefore
+    .filter(p => p.id !== userId)
+    .forEach(participant => {
+      publishUserChatsUpdate(participant.id);
+    });
   
   return true;
 };
@@ -850,12 +938,22 @@ const chatUpdateName = async (parent, args) => {
     chat.last_message = parseLastMessage(chat.last_message);
   }
   
+  // ✅ ADD THIS: Trigger chat list updates for all participants
+  const participants = parseParticipants(chat.participants);
+  participants.forEach(participant => {
+    publishUserChatsUpdate(participant.id);
+  });
+  
   return chat;
 };
 
 const chatDeleteChat = async (parent, args) => {
   const { userToken, chatId } = args;
   const userId = getUserIdFromToken(userToken);
+  
+  // Get participants before deletion
+  const chat = await getChatById({ chatId });
+  const participants = parseParticipants(chat.participants);
   
   await sequelize.query(
     `UPDATE chats SET deleted_at = NOW(), is_active = FALSE WHERE id = ?`,
@@ -864,6 +962,11 @@ const chatDeleteChat = async (parent, args) => {
       replacements: [chatId]
     }
   );
+  
+  // ✅ ADD THIS: Trigger chat list updates for all participants
+  participants.forEach(participant => {
+    publishUserChatsUpdate(participant.id);
+  });
   
   return true;
 };
@@ -955,7 +1058,7 @@ const resolvers = {
         return payload.messageReceived;
       }
     },
-    messageStatusChanged: {  // Add this new resolver
+    messageStatusChanged: {
       subscribe: async (_, args) => {
         const { userToken } = args;
         
@@ -972,9 +1075,28 @@ const resolvers = {
         console.log('📦 Subscription: Resolving messageStatusChanged payload');
         return payload.messageStatusChanged;
       }
+    },
+
+    userChatsUpdated: {
+      subscribe: async (_, args) => {
+        const { userToken } = args;
+        
+        try {
+          const userId = getUserIdFromToken(userToken);
+          console.log(`✅ Subscription: User ${userId} subscribed to userChatsUpdated`);
+          
+          return graphqlPubsub.asyncIterableIterator(`user_chats_updated_${userId}`);
+        } catch (error) {
+          console.error('❌ Subscription authentication error:', error.message);
+          throw new Error("AuthError: invalid user token for subscription");
+        }
+      },
+      resolve: (payload) => {
+        console.log('📦 Subscription: Resolving userChatsUpdated payload');
+        return payload.userChatsUpdated;
+      }
     }
-  
   },
 };
-
+  
 export default { typeDef, resolvers };

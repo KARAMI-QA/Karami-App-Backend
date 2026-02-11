@@ -44,14 +44,16 @@ export const getEmail = async ({ email }) => {
     try {
       const users = await sequelize.query(
         `
-        SELECT *,
-          DATE_FORMAT(created_at, '%Y-%m-%d') AS created_at, 
-          DATE_FORMAT(updated_at, '%Y-%m-%d') AS updated_at,
-          DATE_FORMAT(email_verified_at, '%Y-%m-%dT%H:%i:00.000Z') AS email_verified_at,
-          DATE_FORMAT(phone_verified_at, '%Y-%m-%dT%H:%i:00.000Z') AS phone_verified_at
-        FROM users
-        WHERE email = :email
-        LIMIT 1;
+       SELECT *,
+        DATE_FORMAT(created_at, '%Y-%m-%d') AS created_at, 
+        DATE_FORMAT(updated_at, '%Y-%m-%d') AS updated_at,
+        DATE_FORMAT(email_verified_at, '%Y-%m-%dT%H:%i:00.000Z') AS email_verified_at,
+        DATE_FORMAT(phone_verified_at, '%Y-%m-%dT%H:%i:00.000Z') AS phone_verified_at
+      FROM users
+      WHERE email = :email
+        AND status = 'Active'
+        AND deleted_at IS NULL
+      LIMIT 1;
         `,
         {
           type: QueryTypes.SELECT,
@@ -87,6 +89,7 @@ export const getEmail = async ({ email }) => {
                OR CONCAT(first_name, ' ', last_name) LIKE :fullNameSearch
                OR CONCAT(first_name, ' ', middle_name, ' ', last_name) LIKE :fullNameSearch2)
           AND deleted_at IS NULL
+          AND status = 'Active'
         ORDER BY 
           CASE 
             WHEN name = :exactSearch THEN 1
@@ -133,6 +136,8 @@ export const getEmail = async ({ email }) => {
           DATE_FORMAT(deleted_at, '%Y-%m-%dT%H:%i:00.000Z') AS deleted_at
         FROM users
         WHERE id = :userId
+        AND status = 'Active'
+        AND deleted_at IS NULL
         LIMIT 1;
         `,
         {

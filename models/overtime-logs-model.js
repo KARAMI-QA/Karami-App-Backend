@@ -1,4 +1,4 @@
-import { DataTypes } from "sequelize";
+import { DataTypes, QueryTypes } from "sequelize";
 import sequelize from "../mysql/connection.js";
 
 const OvertimeLogsModel = sequelize.define(
@@ -53,3 +53,69 @@ const OvertimeLogsModel = sequelize.define(
 );
 
 export default OvertimeLogsModel;
+
+export const getOneOvertimeLogsById = async ({ id }) => {
+    try {
+      const overtimeLogs = await sequelize.query(
+        `
+        SELECT *,
+          DATE_FORMAT(start_date_time, '%Y-%m-%dT%H:%i:00.000Z') AS start_date_time,
+          DATE_FORMAT(end_date_time, '%Y-%m-%dT%H:%i:00.000Z') AS end_date_time,
+          DATE_FORMAT(authorize_date, '%Y-%m-%dT%H:%i:00.000Z') AS authorize_date,
+          DATE_FORMAT(created_at, '%Y-%m-%dT%H:%i:00.000Z') AS created_at, 
+          DATE_FORMAT(updated_at, '%Y-%m-%dT%H:%i:00.000Z') AS updated_at,
+          DATE_FORMAT(deleted_at, '%Y-%m-%dT%H:%i:00.000Z') AS deleted_at
+        FROM overtime_logs
+        WHERE id = :id
+          AND deleted_at IS NULL
+        LIMIT 1;
+        `,
+        {
+          type: QueryTypes.SELECT,
+          replacements: { id }
+        }
+      );
+  
+      if (overtimeLogs.length === 0) {
+        throw new Error(`No overtime log found with id: ${id}`);
+      }
+  
+      return overtimeLogs[0];
+    } catch (error) {
+      console.error('Error fetching overtime log by id:', error);
+      throw error;
+    }
+  };
+
+  export const updateOvertimeLogStatus = async ({ id, status, authorizer_id, authorizer_role, authorize_date }) => {
+    try {
+      const updateData = {
+        status,
+        authorizer_id,
+        authorizer_role,
+        authorize_date,
+        updated_at: new Date()
+      };
+  
+      // Remove undefined/null values
+      Object.keys(updateData).forEach(key => {
+        if (updateData[key] === undefined || updateData[key] === null) {
+          delete updateData[key];
+        }
+      });
+  
+      const [affectedRows] = await OvertimeLogsModel.update(updateData, {
+        where: { id }
+      });
+  
+      if (affectedRows === 0) {
+        throw new Error(`No overtime log found with id: ${id}`);
+      }
+  
+      // Return updated overtime log
+      return await getOneOvertimeLogsById({ id });
+    } catch (error) {
+      console.error('Error updating overtime log status:', error);
+      throw error;
+    }
+  };

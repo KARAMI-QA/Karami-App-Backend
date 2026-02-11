@@ -1,4 +1,4 @@
-import { DataTypes } from "sequelize";
+import { DataTypes, QueryTypes } from "sequelize";
 import sequelize from "../mysql/connection.js";
 
 const LoansModel = sequelize.define(
@@ -61,3 +61,68 @@ const LoansModel = sequelize.define(
 );
 
 export default LoansModel;
+
+export const getOneLoansById = async ({ id }) => {
+    try {
+      const loans = await sequelize.query(
+        `
+        SELECT *,
+          DATE_FORMAT(loan_given_date, '%Y-%m-%dT%H:%i:00.000Z') AS loan_given_date,
+          DATE_FORMAT(authorize_date, '%Y-%m-%dT%H:%i:00.000Z') AS authorize_date,
+          DATE_FORMAT(created_at, '%Y-%m-%dT%H:%i:00.000Z') AS created_at, 
+          DATE_FORMAT(updated_at, '%Y-%m-%dT%H:%i:00.000Z') AS updated_at,
+          DATE_FORMAT(deleted_at, '%Y-%m-%dT%H:%i:00.000Z') AS deleted_at
+        FROM loans
+        WHERE id = :id
+          AND deleted_at IS NULL
+        LIMIT 1;
+        `,
+        {
+          type: QueryTypes.SELECT,
+          replacements: { id }
+        }
+      );
+  
+      if (loans.length === 0) {
+        throw new Error(`No loan found with id: ${id}`);
+      }
+  
+      return loans[0];
+    } catch (error) {
+      console.error('Error fetching loan by id:', error);
+      throw error;
+    }
+  };
+
+  export const updateLoanStatus = async ({ id, status, authorizer_id, authorizer_role, authorize_date }) => {
+    try {
+      const updateData = {
+        status,
+        authorizer_id,
+        authorizer_role,
+        authorize_date,
+        updated_at: new Date()
+      };
+  
+      // Remove undefined/null values
+      Object.keys(updateData).forEach(key => {
+        if (updateData[key] === undefined || updateData[key] === null) {
+          delete updateData[key];
+        }
+      });
+  
+      const [affectedRows] = await LoansModel.update(updateData, {
+        where: { id }
+      });
+  
+      if (affectedRows === 0) {
+        throw new Error(`No loan found with id: ${id}`);
+      }
+  
+      // Return updated loan
+      return await getOneLoansById({ id });
+    } catch (error) {
+      console.error('Error updating loan status:', error);
+      throw error;
+    }
+  };

@@ -1,4 +1,4 @@
-import { DataTypes } from "sequelize";
+import { DataTypes, QueryTypes } from "sequelize";
 import sequelize from "../mysql/connection.js";
 
 const ReimbursementsModel = sequelize.define(
@@ -52,3 +52,68 @@ const ReimbursementsModel = sequelize.define(
 );
 
 export default ReimbursementsModel;
+
+export const getOneReimbursementsById = async ({ id }) => {
+  try {
+    const reimbursements = await sequelize.query(
+      `
+      SELECT *,
+        DATE_FORMAT(cleared_date, '%Y-%m-%dT%H:%i:00.000Z') AS cleared_date,
+        DATE_FORMAT(authorize_date, '%Y-%m-%dT%H:%i:00.000Z') AS authorize_date,
+        DATE_FORMAT(created_at, '%Y-%m-%dT%H:%i:00.000Z') AS created_at, 
+        DATE_FORMAT(updated_at, '%Y-%m-%dT%H:%i:00.000Z') AS updated_at,
+        DATE_FORMAT(deleted_at, '%Y-%m-%dT%H:%i:00.000Z') AS deleted_at
+      FROM reimbursements
+      WHERE id = :id
+        AND deleted_at IS NULL
+      LIMIT 1;
+      `,
+      {
+        type: QueryTypes.SELECT,
+        replacements: { id }
+      }
+    );
+
+    if (reimbursements.length === 0) {
+      throw new Error(`No reimbursement found with id: ${id}`);
+    }
+
+    return reimbursements[0];
+  } catch (error) {
+    console.error('Error fetching reimbursement by id:', error);
+    throw error;
+  }
+};
+
+export const updateReimbursementStatus = async ({ id, status, authorizer_id, authorizer_role, authorize_date }) => {
+  try {
+    const updateData = {
+      status,
+      authorizer_id,
+      authorizer_role,
+      authorize_date,
+      updated_at: new Date()
+    };
+
+    // Remove undefined/null values
+    Object.keys(updateData).forEach(key => {
+      if (updateData[key] === undefined || updateData[key] === null) {
+        delete updateData[key];
+      }
+    });
+
+    const [affectedRows] = await ReimbursementsModel.update(updateData, {
+      where: { id }
+    });
+
+    if (affectedRows === 0) {
+      throw new Error(`No reimbursement found with id: ${id}`);
+    }
+
+    // Return updated reimbursement
+    return await getOneReimbursementsById({ id });
+  } catch (error) {
+    console.error('Error updating reimbursement status:', error);
+    throw error;
+  }
+};

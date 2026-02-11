@@ -6,12 +6,6 @@ const graphqlPubsub = new PubSub();
 // Add debug logging to track pubsub events
 const originalPublish = graphqlPubsub.publish.bind(graphqlPubsub);
 graphqlPubsub.publish = async (triggerName, payload) => {
-  console.log('📢 PubSub Publish:', {
-    triggerName,
-    payloadType: Object.keys(payload)[0], // Shows 'messageReceived' or 'messageStatusChanged'
-    timestamp: new Date().toISOString(),
-    hasMessageId: !!payload.messageReceived?.id || !!payload.messageStatusChanged?.id
-  });
   
   try {
     const result = await originalPublish(triggerName, payload);

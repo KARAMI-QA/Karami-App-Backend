@@ -121,6 +121,22 @@ export const getChatById = async ({ chatId, currentUserId = null }) => {
           DATE_FORMAT(c.updated_at, '%Y-%m-%dT%H:%i:00.000Z') AS updated_at,
           DATE_FORMAT(c.last_message_at, '%Y-%m-%dT%H:%i:00.000Z') AS last_message_at,
           
+          -- Get participants info (ADD THIS SECTION)
+          (
+            SELECT JSON_ARRAYAGG(
+              JSON_OBJECT(
+                'id', u.id,
+                'name', COALESCE(u.name, CONCAT(u.first_name, ' ', u.last_name)),
+                'email', u.email,
+                'image', u.image,
+                'is_online', false
+              )
+            )
+            FROM chat_participants cp
+            JOIN users u ON cp.user_id = u.id
+            WHERE cp.chat_id = c.id AND cp.deleted_at IS NULL
+          ) as participants,
+          
           -- Get other participant info for direct chats (FIXED)
           CASE 
             WHEN c.type = 'DIRECT' THEN (
